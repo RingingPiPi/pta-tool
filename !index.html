@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>PTA 合同生成器 V40.2</title>
+    <link rel="manifest" href="manifest.json">
+    <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #F5F5F5; margin: 0; padding: 15px; color: #333; -webkit-tap-highlight-color: transparent; }
+        .card { background: white; border-radius: 12px; padding: 15px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); margin-bottom: 15px; }
+        h1 { font-size: 20px; color: #1A73E8; margin: 0 0 10px 0; text-align: center; }
+        h2 { font-size: 16px; margin: 0 0 10px 0; color: #555; border-bottom: 1px solid #eee; padding-bottom: 5px; }
+        label { display: block; font-size: 13px; font-weight: bold; margin-bottom: 5px; color: #666; }
+        textarea { width: 100%; height: 100px; border: 1px solid #ddd; border-radius: 8px; padding: 10px; font-size: 14px; box-sizing: border-box; outline: none; }
+        input[type="text"], input[type="file"] { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 8px; box-sizing: border-box; font-size: 14px; outline: none; }
+        .row { display: flex; gap: 10px; margin-bottom: 10px; }
+        .col { flex: 1; }
+        button { width: 100%; background-color: #1A73E8; color: white; border: none; padding: 12px; border-radius: 25px; font-size: 16px; font-weight: bold; cursor: pointer; transition: background 0.2s; }
+        button:active { background-color: #1557B0; transform: scale(0.98); }
+        .btn-green { background-color: #34A853; }
+        .status { font-size: 12px; color: #888; text-align: center; margin-top: 10px; }
+        .tag { background: #E8F0FE; color: #1A73E8; padding: 2px 8px; border-radius: 4px; font-size: 12px; }
+    </style>
+</head>
+<body>
+
+    <h1>PTA 合同生成器 <span class="tag">V40.2 PWA</span></h1>
+
+    <div class="card">
+        <h2>1. 选择模板</h2>
+        <input type="file" id="templateFile" accept=".xlsx" />
+        <div style="margin-top:5px; font-size:12px; color:#999;">请选择手机/电脑中的 Excel 模板文件</div>
+    </div>
+
+    <div class="card">
+        <h2>2. 粘贴明细</h2>
+        <textarea id="inputText" placeholder="在此粘贴微信成交明细..."></textarea>
+    </div>
+
+    <div class="card">
+        <h2>3. 补充信息</h2>
+        <div class="row">
+            <div class="col">
+                <label>主力合约</label>
+                <input type="text" id="contractCode" placeholder="自动推算">
+            </div>
+            <div class="col">
+                <label>昨日结算价</label>
+                <input type="text" id="settlePrice" placeholder="自动/手动">
+            </div>
+        </div>
+        <button class="btn-green" onclick="fetchPrice()">📈 获取行情 (新浪)</button>
+    </div>
+
+    <button onclick="generate()">🚀 生成并下载合同</button>
+    <div class="status" id="statusMsg">准备就绪</div>
+
+<script>
+    // 注册 Service Worker
+    if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('./sw.js')
+            .then(() => console.log('SW Registered'))
+            .catch(err => console.log('SW Error:', err));
+    }
+
+    // 初始化：推算主力合约
+    window.onload = function() {
+        document.getElementById('contractCode').value = calculateMainContract();
+    }
+
+    // --- 核心逻辑 (JS 复刻版) ---
+
+    function calculateMainContract() {
+        const now = new Date();
+        const m = now.getMonth() + 1; // 0-11 -> 1-12
+        const d = now.getDate();
+        const y = now.getFullYear();
+        let targetY = y;
+        let suffix = "01";
+
+        // 12/15 - 4/14 -> 05
+        if ((m === 12 && d >= 15) || (m >= 1 && m <= 3) || (m === 4 && d < 15)) {
+            targetY = m === 12 ? y + 1 : y;
+            suffix = "05";
+        } 
+        // 4/15 - 8/14 -> 09
+        else if ((m === 4 && d >= 15) || (m >= 5 && m <= 7) || (m === 8 && d < 15)) {
+            suffix = "09";
+        } 
+        // 8/15 - 12/14 -> 01
+        else {
+            targetY = y + 1;
+            suffix = "01";
+        }
+        return `TA${String(targetY).slice(-2)}${suffix}`;
+    }
+
+    // 跨域获取新浪行情 (利用 JSONP 原理动态注入 Script)
+    function fetchPrice() {
+        const code = document.getElementById('contractCode').value.toUpperCase();
+        if (!code) return alert("请先填写合约代码");
+
+        const script = document.createElement('script');
+        // 使用 https 协议，尝试 nf_ 前缀
+        script.src = `https://hq.sinajs.cn/list=nf_${code}`;
+        
+        script.onload = () => {
+            // 新浪返回 var hq_str_nf_TA2605 = "..."
+            const varName = `hq_str_nf_${code}`;
+            if (window[varName]) {
+                const parts = window[varName].split(',');
+                // Index 10 是昨结 (国内期货)
+                if (parts.length > 10) {
+                    document.getElementById('settlePrice').value = parts[10]; // 昨结
+                    document.getElementById('statusMsg').innerText = `✅ 获取成功: 昨结 ${parts[10]}, 最新 ${parts[8]}`;
+                } else {
+                    alert("数据格式解析失败，请手动填写。");
+                }
+            } else {
+                alert("未获取到数据，请检查代码或网络。");
+            }
+            document.body.removeChild(script);
+        };
+        script.onerror = () => {
+            alert("请求失败，可能是网络问题。");
+            document.body.removeChild(script);
+        };
+        document.body.appendChild(script);
+    }
+
+    function parseText(text) {
+        const data = {};
+        const lines = text.trim().split('\n');
+        
+        const find = (regex) => (text.match(regex) || [])[1] || "";
+        
+        data.buyer = find(/需方[：:]\s*(.*)/).trim();
+        data.seller = find(/供方[：:]\s*(.*)/).trim();
+        
+        // 序号转后缀
+        const firstChar = text.trim().charAt(0);
+        const map = {'1':'A','一':'A','2':'B','二':'B','3':'C','三':'C'};
+        data.suffix = map[firstChar] || 'A';
+
+        // 日期
+        const now = new Date();
+        const dateMatch = lines[0].match(/(\d{1,2})[/-](\d{1,2})/);
+        let tradeDate = new Date();
+        if (dateMatch) {
+            tradeDate.setMonth(parseInt(dateMatch[1]) - 1);
+            tradeDate.setDate(parseInt(dateMatch[2]));
+            // 跨年修正
+            if (now.getMonth() === 0 && tradeDate.getMonth() === 11) {
+                tradeDate.setFullYear(now.getFullYear() - 1);
+            }
+        }
+        
+        data.year = String(tradeDate.getFullYear());
+        const mm = String(tradeDate.getMonth()+1).padStart(2,'0');
+        const dd = String(tradeDate.getDate()).padStart(2,'0');
+        data.dateCode = `${mm}${dd}`;
+        data.fullDate = `${data.year}年${mm}月${dd}日`;
+        data.dateSuffix = `${data.dateCode}${data.suffix}`; // 强力组合变量
+
+        // 保证金
+        const marginRaw = find(/保证金[：:]\s*(.*)/);
+        let marginDate = "";
+        const mMatch = marginRaw.match(/(\d{1,2})[月/-](\d{1,2})/);
+        if (mMatch) {
+            let mYear = tradeDate.getFullYear();
+            if (tradeDate.getMonth() === 11 && parseInt(mMatch[1]) === 1) mYear++;
+            marginDate = `${mYear}年${mMatch[1]}月${mMatch[2]}日`;
+        }
+        data.margin = marginRaw;
+        data.marginDate = marginDate;
+
+        // 地点
+        let loc = find(/(?:交割码头|交割地点|交割地)[：:]\s*(.*)/).trim();
+        let cleanLoc = loc.replace(/^需方|^供方/, "").trim();
+        if (cleanLoc && !cleanLoc.includes("自提") && !cleanLoc.includes("送到")) cleanLoc += "自提";
+        data.location = cleanLoc;
+
+        // 价格与基差
+        const priceStr = find(/(?:单价|暂定单价)[：:]\s*(.*)/);
+        let price = parseFloat(priceStr.match(/[-+]?\d*\.\d+|\d+/) || 0);
+        data.price = price;
+
+        const basisStr = find(/基差[：:]\s*(.*)/).toUpperCase();
+        data.isPost = !!basisStr;
+        data.basis = basisStr;
+
+        // V40.2 品牌逻辑
+        let rawBrand = find(/品牌[：:]\s*(.*)/).trim();
+        let cleanBrand = rawBrand.replace(/\/一等品|一等品|\/优等品|优等品/g, "").replace(/[\(（].*?[\)）]/g, "").trim();
+        let grade = "优等品";
+        if (cleanBrand.includes("威联") || cleanBrand.includes("威廉")) {
+            cleanBrand = "威联化学";
+            grade = "一等品";
+        }
+        // 保留原括号内容
+        let bracket = rawBrand.match(/[\(（](.*?)[\)）]/);
+        if (bracket) grade = `(${bracket[1]})`;
+        else grade = `(${grade})`;
+        
+        data.brand = cleanBrand;
+        data.grade = `\n${grade}`; // 强制换行
+        data.brandFull = `${cleanBrand}\n${grade}`;
+
+        // 合约代码 (优先用UI填的，其次推算)
+        data.contract = document.getElementById('contractCode').value || getContractCode(tradeDate);
+        
+        // 昨结
+        data.settle = document.getElementById('settlePrice').value || (data.isPost ? "【请补充】" : "");
+
+        // 智能基差描述
+        if (data.isPost) {
+            let basisNum = basisStr.match(/[-+]\d+/);
+            if (basisNum) {
+                let txt = basisNum[0].startsWith('-') ? `减${basisNum[0].slice(1)}` : `加${basisNum[0].slice(1)}`;
+                data.basisDesc = txt;
+                data.basisVal = basisNum[0].replace('+', '');
+            } else {
+                 data.basisDesc = `加${basisStr}`; // 兜底
+                 data.basisVal = basisStr;
+            }
+        }
+
+        return data;
+    }
+
+    async function generate() {
+        const fileInput = document.getElementById('templateFile');
+        const text = document.getElementById('inputText').value;
+
+        if (fileInput.files.length === 0) return alert("❌ 请先选择模板！");
+        if (!text) return alert("❌ 请先粘贴成交明细！");
+
+        const btn = document.querySelector('button[onclick="generate()"]');
+        btn.innerText = "⏳ 处理中...";
+        btn.disabled = true;
+
+        try {
+            const data = parseText(text);
+            
+            // 审核逻辑
+            const errors = [];
+            if (!data.buyer) errors.push("未识别到【需方】");
+            if (data.price <= 0) errors.push("价格异常");
+            if (data.isPost && !data.basis) errors.push("后点价缺失基差");
+            
+            if (errors.length > 0) {
+                if(!confirm(`⚠️ 检测到以下问题，是否继续？\n\n${errors.join('\n')}`)) {
+                    btn.innerText = "🚀 生成并下载合同";
+                    btn.disabled = false;
+                    return;
+                }
+            }
+
+            // 读取 Excel
+            const workbook = new ExcelJS.Workbook();
+            const buffer = await fileInput.files[0].arrayBuffer();
+            await workbook.xlsx.load(buffer);
+            
+            const ws = workbook.worksheets[0];
+            
+            // 填充逻辑 (复刻 Python 核心)
+            ws.eachRow((row) => {
+                row.eachCell((cell) => {
+                    if (cell.value && typeof cell.value === 'string') {
+                        let val = cell.value;
+                        let changed = false;
+                        
+                        const map = {
+                            '{{需方}}': data.buyer,
+                            '{{供方}}': data.seller,
+                            '{{暂定单价}}': data.price,
+                            '{{最终单价}}': data.price,
+                            '{{基准价}}': data.price, // 一口价用
+                            '{{基差}}': data.basisVal,
+                            '{{基差描述}}': data.basisDesc,
+                            '{{合约代码}}': data.contract,
+                            '{{品牌}}': data.brand,
+                            '{{等级}}': data.grade,
+                            '{{品牌完整}}': data.brandFull,
+                            '{{昨结}}': data.settle,
+                            '{{日期代码}}': data.dateCode,
+                            '{{后缀}}': data.suffix,
+                            '{{日期+后缀}}': data.dateSuffix,
+                            '{{签订日期}}': data.fullDate,
+                            '{{年份}}': data.year,
+                            '{{交割码头}}': data.location,
+                            '{{保证金}}': data.margin,
+                            '{{保证金日期}}': data.marginDate
+                        };
+
+                        for (let key in map) {
+                            if (val.includes(key)) {
+                                val = val.replace(key, map[key] || "");
+                                changed = true;
+                            }
+                        }
+
+                        if (changed) {
+                            cell.value = val;
+                            // 标红 + 除黄
+                            cell.font = Object.assign({}, cell.font, { color: { argb: 'FFFF0000' } });
+                            cell.fill = { type: 'pattern', pattern: 'none' }; 
+                            // 强制换行
+                            if (String(val).includes('\n')) {
+                                cell.alignment = Object.assign({}, cell.alignment, { wrapText: true });
+                            }
+                        }
+                    }
+                });
+            });
+
+            // 导出
+            const outBuffer = await workbook.xlsx.writeBuffer();
+            const blob = new Blob([outBuffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+            const fileName = `${data.seller}-${data.buyer} ${data.dateCode}${data.suffix}.xlsx`;
+            saveAs(blob, fileName);
+            
+            document.getElementById('statusMsg').innerText = `✅ 已生成: ${fileName}`;
+
+        } catch (err) {
+            alert("生成失败: " + err.message);
+        } finally {
+            btn.innerText = "🚀 生成并下载合同";
+            btn.disabled = false;
+        }
+    }
+</script>
+</body>
+</html>
